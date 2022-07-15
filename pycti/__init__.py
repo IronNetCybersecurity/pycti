@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-__version__ = "5.3.7"
+import importlib_metadata
 
 from .api.opencti_api_client import OpenCTIApiClient
 from .api.opencti_api_connector import OpenCTIApiConnector
@@ -93,3 +92,5 @@ __all__ = [
     "Vulnerability",
     "get_config_variable",
 ]
+
+__version__ = importlib_metadata.version("pycti")

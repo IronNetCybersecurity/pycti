@@ -1,6 +1,65 @@
-[build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
+[tool.poetry]
+name = "pycti"
+version = "5.3.7+vhost1"
+description = "Python API client for OpenCTI."
+authors = ["OpenCTI <contact@opencti.io>"]
+maintainers = ["OpenCTI <contact@opencti.io>"]
+homepage = "https://github.com/OpenCTI-Platform/client-python"
+repository = "https://github.com/OpenCTI-Platform/client-python"
+documentation = "https://luatix.notion.site/OpenCTI-Public-Knowledge-Base-d411e5e477734c59887dad3649f20518"
+readme = "README.md"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Natural Language :: French",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[tool.poetry.dependencies]
+python = "^3.7"
+datefinder = "^0.7.1"
+pika = "^1.3.0"
+python-json-logger = "^2.0.4"
+python-magic-bin = { version = "^0.4.14", markers = "sys_platform == 'win32'" }
+python-magic = { version = "^0.4.27", markers = "sys_platform == 'linux' or sys_platform == 'darwin'" }
+PyYAML = "^6.0"
+requests = "^2.28.1"
+sseclient = "^0.0.27"
+stix2 = "^3.0.1"
+autoapi = { version = "^2.0.1", optional = true }
+sphinx-autodoc-typehints = { version = "^1.18.3", optional = true }
+sphinx-rtd-theme = { version = "^1.0.0", optional = true }
+importlib-metadata = "^4.12.0"
+
+[tool.poetry.dev-dependencies]
+black = "^22.6.0"
+build = "^0.8.0"
+isort = "^5.10.1"
+pre-commit = "^2.20.0"
+pre-commit-hooks = "^4.3.0"
+pytest = "^7.1.2"
+pytest-cases = "^3.6.13"
+pytest-cov = "^3.0.0"
+pytest-randomly = "^3.12.0"
+types-python-dateutil = "^2.8.18"
+types-pytz = "^2022.1.1"
+wheel = "^0.37.1"
+yamllint = "^1.27.1"
+
+[tool.poetry.extras]
+doc = [
+    "autoapi",
+    "sphinx-autodoc-typehints",
+    "sphinx-rtd-theme",
+]
 
 [tool.isort]
 profile = "black"
@@ -24,3 +83,7 @@ warn_redundant_casts = true
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = true
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
