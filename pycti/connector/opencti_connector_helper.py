@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import base64
-import datetime
 import json
 import logging
 import os
@@ -10,9 +11,13 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Callable, Dict, List, Optional, Union
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import FrameType, TracebackType
+from typing import Any, Callable, Dict, List, Mapping, Optional, Type, Union
 
 import pika
+import yaml
 from pika.exceptions import NackError, UnroutableError
 from sseclient import SSEClient
 
@@ -20,64 +25,81 @@ from pycti.api.opencti_api_client import OpenCTIApiClient
 from pycti.connector.opencti_connector import OpenCTIConnector
 from pycti.utils.opencti_stix2_splitter import OpenCTIStix2Splitter
 
-TRUTHY: List[str] = ["yes", "true", "True"]
-FALSY: List[str] = ["no", "false", "False"]
+STIX_EXT_MITRE = "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
+STIX_EXT_OCTI = "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
+STIX_EXT_OCTI_SCO = "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
 
+log = logging.getLogger(__name__)
 logging.getLogger("pika").setLevel(logging.ERROR)
 
 
-def killProgramHook(etype, value, tb):
+def kill_program_hook(
+    etype: Type[BaseException],
+    value: BaseException,
+    tb: TracebackType,
+):
+    """
+    Print an exception and then kill the program
+    :param etype: Exception type
+    :param value: The exception itself
+    :param tb: Traceback
+    :return: None
+    """
     traceback.print_exception(etype, value, tb)
     os.kill(os.getpid(), signal.SIGKILL)
 
 
-sys.excepthook = killProgramHook
+sys.excepthook = kill_program_hook
 
 
 def get_config_variable(
     env_var: str,
     yaml_path: List,
-    config: Dict = {},
-    isNumber: Optional[bool] = False,
+    config: Dict[str, Any] = None,
+    is_number: bool = False,
     default=None,
-) -> Union[bool, int, None, str]:
-    """[summary]
-
-    :param env_var: environnement variable name
-    :param yaml_path: path to yaml config
-    :param config: client config dict, defaults to {}
-    :param isNumber: specify if the variable is a number, defaults to False
+) -> Union[bool, int, str, None]:
+    """Get a configuration variable from various sources
+    :param env_var: Environment variable name
+    :param yaml_path: Path to yaml config
+    :param config: Client config dict
+    :param is_number: Specify if the variable is a number
+    :param default: Default value
     """
+    if config is None:
+        config = {}
 
     if os.getenv(env_var) is not None:
         result = os.getenv(env_var)
     elif yaml_path is not None:
-        if yaml_path[0] in config and yaml_path[1] in config[yaml_path[0]]:
-            result = config[yaml_path[0]][yaml_path[1]]
-        else:
-            return default
+        result = config
+        for path in yaml_path:
+            result = result.get(path)
+            if result is None:
+                return default
     else:
         return default
 
-    if result in TRUTHY:
-        return True
-    if result in FALSY:
-        return False
-    if isNumber:
-        return int(result)
+    if isinstance(result, str):
+        if len(result) == 0:
+            return default
 
-    if isinstance(result, str) and len(result) == 0:
-        return default
+        lowered = result.lower()
+        if lowered in ["yes", "true"]:
+            return True
+        if lowered in ["no", "false"]:
+            return False
+
+    if is_number:
+        return int(result)
 
     return result
 
 
 def create_ssl_context() -> ssl.SSLContext:
-    """Set strong SSL defaults: require TLSv1.2+
-
+    """Set strong SSL defaults, requires TLSv1.2+
     `ssl` uses bitwise operations to specify context `<enum 'Options'>`
     """
-
     ssl_context_options: List[int] = [
         ssl.OP_NO_COMPRESSION,
         ssl.OP_NO_TICKET,  # pylint: disable=no-member
@@ -85,8 +107,8 @@ def create_ssl_context() -> ssl.SSLContext:
         ssl.OP_SINGLE_DH_USE,
         ssl.OP_SINGLE_ECDH_USE,
     ]
-    ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
-    ssl_context.options &= ~ssl.OP_ENABLE_MIDDLEBOX_COMPAT  # pylint: disable=no-member
+    ssl_context = ssl.create_default_context()
+    ssl_context.options &= ~ssl.OP_ENABLE_MIDDLEBOX_COMPAT
     ssl_context.verify_mode = ssl.CERT_REQUIRED
     ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
 
@@ -96,19 +118,56 @@ def create_ssl_context() -> ssl.SSLContext:
     return ssl_context
 
 
-class ListenQueue(threading.Thread):
-    """Main class for the ListenQueue used in OpenCTIConnectorHelper
-
-    :param helper: instance of a `OpenCTIConnectorHelper` class
-    :type helper: OpenCTIConnectorHelper
-    :param config: dict containing client config
-    :type config: Dict
-    :param callback: callback function to process queue
-    :type callback: callable
+def read_yaml_config(path: str) -> Optional[Dict[str, Any]]:
+    """Find the `config.yml` file within the hierarchy of `path`
+    :param path: Arbitrary path, use __file__ or relative ./config.yml
+    :return: The loaded YAML or None
     """
+    config_name = "config.yml"
+    base_path = Path(path).absolute()
 
-    def __init__(self, helper, config: Dict, callback) -> None:
-        threading.Thread.__init__(self)
+    # Passed an explicit path
+    if base_path.name == config_name:
+        if not base_path.exists():
+            log.warning("Config path does not exist: %s", base_path)
+            return None
+        elif not base_path.is_file():
+            log.warning("Config path is not a file: %s", base_path)
+            return None
+        else:
+            return yaml.load(base_path.open(), Loader=yaml.SafeLoader)
+
+    # Arbitrarily check 3 nodes deep, safer than `while True`
+    for _ in range(3):
+        config_path = base_path.joinpath(config_name)
+        if config_path.exists() and config_path.is_file():
+            return yaml.load(config_path.open(), Loader=yaml.SafeLoader)
+
+        if not config_path.parents:
+            break
+
+        base_path = base_path.parent
+
+    log.warning(f"Could not find '{config_name}' in hierarchy of {path}")
+    return None
+
+
+class ListenQueue(threading.Thread):
+    """Main class for the ListenQueue used in OpenCTIConnectorHelper"""
+
+    def __init__(
+        self,
+        helper: OpenCTIConnectorHelper,
+        config: Dict[str, Any],
+        callback: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """
+        Create a new ListenQueue object
+        :param helper: OpenCTI connector helper
+        :param config: Client configuration
+        :param callback: Callable for processing queue messages
+        """
+        super().__init__()
         self.pika_credentials = None
         self.pika_parameters = None
         self.pika_connection = None
@@ -125,20 +184,19 @@ class ListenQueue(threading.Thread):
         self.exit_event = threading.Event()
         self.thread = None
 
-    # noinspection PyUnusedLocal
-    def _process_message(self, channel, method, properties, body) -> None:
-        """process a message from the rabbit queue
-
-        :param channel: channel instance
-        :type channel: callable
-        :param method: message methods
-        :type method: callable
-        :param properties: unused
-        :type properties: str
+    def _process_message(
+        self,
+        channel: pika.adapters.blocking_connection.BlockingChannel,
+        method: pika.spec.Basic.Deliver,
+        _properties: pika.spec.BasicProperties,
+        body: bytes,
+    ) -> None:
+        """Process a message from the queue
+        :param channel: Active message channel
+        :param method: Message delivery spec
+        :param _properties: Message properties spec
         :param body: message body (data)
-        :type body: str or bytes or bytearray
         """
-
         json_data = json.loads(body)
         channel.basic_ack(delivery_tag=method.delivery_tag)
         self.thread = threading.Thread(target=self._data_handler, args=[json_data])
@@ -155,12 +213,9 @@ class ListenQueue(threading.Thread):
                 time_wait += 1
             time.sleep(1)
 
-        logging.info(
-            "%s",
-            (
-                f"Message (delivery_tag={method.delivery_tag}) processed"
-                ", thread terminated"
-            ),
+        log.info(
+            "Message (delivery_tag=%s) processed, thread terminated",
+            method.delivery_tag,
         )
 
     def _data_handler(self, json_data) -> None:
@@ -221,7 +276,7 @@ class ListenQueue(threading.Thread):
 
 class PingAlive(threading.Thread):
     def __init__(self, connector_id, api, get_state, set_state) -> None:
-        threading.Thread.__init__(self)
+        super().__init__()
         self.connector_id = connector_id
         self.in_error = False
         self.api = api
@@ -281,7 +336,7 @@ class ListenStream(threading.Thread):
         recover_iso_date,
         with_inferences,
     ) -> None:
-        threading.Thread.__init__(self)
+        super().__init__()
         self.helper = helper
         self.callback = callback
         self.url = url
@@ -294,7 +349,6 @@ class ListenStream(threading.Thread):
         self.recover_iso_date = recover_iso_date
         self.with_inferences = with_inferences if with_inferences is not None else False
         self.exit_event = threading.Event()
-        self.exit = False
 
     def run(self) -> None:  # pylint: disable=too-many-branches
         try:
@@ -424,7 +478,7 @@ class ListenStream(threading.Thread):
                 )
             # Iter on stream messages
             for msg in messages:
-                if self.exit:
+                if self.exit_event.is_set():
                     break
                 if msg.event == "heartbeat" or msg.event == "connected":
                     continue
@@ -443,110 +497,252 @@ class ListenStream(threading.Thread):
             sys.excepthook(*sys.exc_info())
 
     def stop(self):
-        self.exit = True
         self.exit_event.set()
 
 
-class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
-    """Python API for OpenCTI connector
+class ConnectorLoop(threading.Thread):
+    """Helper that reduces external-import boilerplate for looping and state management"""
 
-    :param config: dict standard config
-    :type config: Dict
-    """
+    def __init__(
+        self,
+        helper: OpenCTIConnectorHelper,
+        callback: Callable[[str], None],
+        stop_on_error: bool = False,
+    ) -> None:
+        """
+        Create a new ListenQueue object
+        :param helper: OpenCTI connector helper
+        :param callback: callback(work_id), executed after the interval has elapsed
+        :param stop_on_error: Stop looping when an unhandled exception is thrown
+        """
+        super().__init__()
+        self._helper = helper
+        self._callback = callback
+        self._stop_on_error = stop_on_error
+        self._exit_event = threading.Event()
 
-    def __init__(self, config: Dict) -> None:
+    def run(self) -> None:
+        """Run the connector loop.
+        :return: None
+        """
+        log.info("Starting connector loop")
+
+        while True:
+            try:
+                self._run_loop()
+            except KeyboardInterrupt:
+                log.info("Connector stop (interrupt)")
+                break
+            except SystemExit:
+                log.info("Connector stop (exit)")
+                break
+            except Exception as ex:
+                log.exception("Unhandled exception in connector loop: %s", ex)
+                if self._stop_on_error:
+                    break
+
+            if self._helper.connect_run_and_terminate:
+                log.info("Connector stop (run-once)")
+                break
+
+            if self._exit_event.is_set():
+                log.info("Connector stop (event)")
+                break
+
+            time.sleep(self._helper.loop_interval)
+
+        # Ensure the state is pushed
+        self._helper.force_ping()
+
+    def _run_loop(self) -> None:
+        """The looping portion of the connector loop.
+        :return: None
+        """
+        # Get the current timestamp and check
+        state = self._helper.get_state() or {}
+
+        now = datetime.utcnow().replace(microsecond=0)
+        last_run = state.get("last_run", 0)
+        last_run = datetime.utcfromtimestamp(last_run).replace(microsecond=0)
+
+        if last_run.year == 1970:
+            log.info("Connector has never run")
+        else:
+            log.info(f"Connector last run: {last_run}")
+
+        # Check the difference between now and the last run to the interval
+        if (now - last_run).total_seconds() > self._helper.interval:
+            log.info("Connector will now run")
+            last_run = now
+
+            name = self._helper.connect_name or "Connector"
+            work_id = self._helper.api.work.initiate_work(
+                self._helper.connect_id,
+                f"{name} run @ {now}",
+            )
+
+            try:
+                self._callback(work_id)
+            except Exception as ex:
+                log.exception(f"Unhandled exception processing connector feed: %s", ex)
+                self._helper.api.work.to_processed(work_id, "Failed", in_error=True)
+            else:
+                log.info("Connector successfully run")
+                self._helper.api.work.to_processed(work_id, "Complete")
+
+            # Get the state again, incase it changed in the callback
+            state = self._helper.get_state() or {}
+
+            # Store the start time as the last run
+            state["last_run"] = int(now.timestamp())
+            self._helper.set_state(state)
+
+            next_run = last_run + timedelta(seconds=self._helper.interval)
+            log.info(f"Last_run stored, next run at %s", next_run)
+        else:
+            next_run = last_run + timedelta(seconds=self._helper.interval)
+            log.info(f"Connector will not run, next run at %s", next_run)
+
+    def stop(self) -> None:
+        """Stop the thread
+        :return: None
+        """
+        self._exit_event.set()
+
+
+class OpenCTIConnectorHelper:
+    """Python API for OpenCTI connector"""
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initialize an OpenCTIConnectorHelper
+        :param config: Configuration dictionary
+        """
+
         # Load API config
         self.opencti_url = get_config_variable(
-            "OPENCTI_URL", ["opencti", "url"], config
-        )
+            "OPENCTI_URL",
+            ["opencti", "url"],
+            config,
+        )  # type: Optional[str]
         self.opencti_token = get_config_variable(
-            "OPENCTI_TOKEN", ["opencti", "token"], config
-        )
+            "OPENCTI_TOKEN",
+            ["opencti", "token"],
+            config,
+        )  # type: Optional[str]
         self.opencti_ssl_verify = get_config_variable(
-            "OPENCTI_SSL_VERIFY", ["opencti", "ssl_verify"], config, False, True
-        )
+            "OPENCTI_SSL_VERIFY",
+            ["opencti", "ssl_verify"],
+            config,
+            default=True,
+        )  # type: bool
         self.opencti_json_logging = get_config_variable(
-            "OPENCTI_JSON_LOGGING", ["opencti", "json_logging"], config
-        )
+            "OPENCTI_JSON_LOGGING",
+            ["opencti", "json_logging"],
+            config,
+            default=False,
+        )  # type: bool
+
         # Load connector config
         self.connect_id = get_config_variable(
-            "CONNECTOR_ID", ["connector", "id"], config
-        )
+            "CONNECTOR_ID",
+            ["connector", "id"],
+            config,
+        )  # type: Optional[str]
         self.connect_type = get_config_variable(
-            "CONNECTOR_TYPE", ["connector", "type"], config
-        )
-        self.connect_live_stream_id = get_config_variable(
-            "CONNECTOR_LIVE_STREAM_ID",
-            ["connector", "live_stream_id"],
+            "CONNECTOR_TYPE",
+            ["connector", "type"],
             config,
-            False,
-            None,
-        )
-        self.connect_live_stream_listen_delete = get_config_variable(
-            "CONNECTOR_LIVE_STREAM_LISTEN_DELETE",
-            ["connector", "live_stream_listen_delete"],
-            config,
-            False,
-            True,
-        )
-        self.connect_live_stream_no_dependencies = get_config_variable(
-            "CONNECTOR_LIVE_STREAM_NO_DEPENDENCIES",
-            ["connector", "live_stream_no_dependencies"],
-            config,
-            False,
-            False,
-        )
-        self.connect_live_stream_with_inferences = get_config_variable(
-            "CONNECTOR_LIVE_STREAM_WITH_INFERENCES",
-            ["connector", "live_stream_with_inferences"],
-            config,
-            False,
-            False,
-        )
+        )  # type: Optional[str]
         self.connect_name = get_config_variable(
-            "CONNECTOR_NAME", ["connector", "name"], config
-        )
-        self.connect_confidence_level = get_config_variable(
-            "CONNECTOR_CONFIDENCE_LEVEL",
-            ["connector", "confidence_level"],
+            "CONNECTOR_NAME",
+            ["connector", "name"],
             config,
-            True,
-        )
+        )  # type: Optional[str]
         self.connect_scope = get_config_variable(
-            "CONNECTOR_SCOPE", ["connector", "scope"], config
-        )
+            "CONNECTOR_SCOPE",
+            ["connector", "scope"],
+            config,
+        )  # type: Optional[str]
         self.connect_auto = get_config_variable(
-            "CONNECTOR_AUTO", ["connector", "auto"], config, False, False
-        )
+            "CONNECTOR_AUTO",
+            ["connector", "auto"],
+            config,
+            default=False,
+        )  # type: bool
         self.connect_only_contextual = get_config_variable(
             "CONNECTOR_ONLY_CONTEXTUAL",
             ["connector", "only_contextual"],
             config,
-            False,
-            False,
-        )
+            default=False,
+        )  # type: bool
+
+        # ConnectorLoop config
+        self.interval = get_config_variable(
+            "CONNECTOR_INTERVAL",
+            ["connector", "interval"],
+            is_number=True,
+            default=60 * 60 * 24,  # 1 day
+        )  # type: int
+        self.loop_interval = get_config_variable(
+            "CONNECTOR_LOOP_INTERVAL",
+            ["connector", "loop_interval"],
+            is_number=True,
+            default=60,  # 1 min
+        )  # type: int
+
+        # ListenStream config
+        self.connect_live_stream_id = get_config_variable(
+            "CONNECTOR_LIVE_STREAM_ID",
+            ["connector", "live_stream_id"],
+            config,
+        )  # type: Optional[str]
+        self.connect_live_stream_listen_delete = get_config_variable(
+            "CONNECTOR_LIVE_STREAM_LISTEN_DELETE",
+            ["connector", "live_stream_listen_delete"],
+            config,
+            default=True,
+        )  # type: bool
+        self.connect_live_stream_no_dependencies = get_config_variable(
+            "CONNECTOR_LIVE_STREAM_NO_DEPENDENCIES",
+            ["connector", "live_stream_no_dependencies"],
+            config,
+            default=False,
+        )  # type: bool
+        self.connect_live_stream_with_inferences = get_config_variable(
+            "CONNECTOR_LIVE_STREAM_WITH_INFERENCES",
+            ["connector", "live_stream_with_inferences"],
+            config,
+            default=False,
+        )  # type: bool
+
+        # Generic config
+        self.connect_confidence_level = get_config_variable(
+            "CONNECTOR_CONFIDENCE_LEVEL",
+            ["connector", "confidence_level"],
+            config,
+            is_number=True,
+        )  # type: int
         self.log_level = get_config_variable(
-            "CONNECTOR_LOG_LEVEL", ["connector", "log_level"], config
-        )
+            "CONNECTOR_LOG_LEVEL",
+            ["connector", "log_level"],
+            config,
+            default="INFO",
+        )  # type: Optional[str]
         self.connect_run_and_terminate = get_config_variable(
             "CONNECTOR_RUN_AND_TERMINATE",
             ["connector", "run_and_terminate"],
             config,
-            False,
-            False,
-        )
+            default=False,
+        )  # type: bool
         self.connect_validate_before_import = get_config_variable(
             "CONNECTOR_VALIDATE_BEFORE_IMPORT",
             ["connector", "validate_before_import"],
             config,
-            False,
-            False,
-        )
+            default=False,
+        )  # type: bool
 
         # Configure logger
-        numeric_level = getattr(
-            logging, self.log_level.upper() if self.log_level else "INFO", None
-        )
+        numeric_level = getattr(logging, self.log_level.upper(), None)
         if not isinstance(numeric_level, int):
             raise ValueError(f"Invalid log level: {self.log_level}")
         logging.basicConfig(level=numeric_level)
@@ -558,6 +754,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             self.log_level,
             json_logging=self.opencti_json_logging,
         )
+
         # Register the connector in OpenCTI
         self.connector = OpenCTIConnector(
             self.connect_id,
@@ -567,13 +764,17 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             self.connect_auto,
             self.connect_only_contextual,
         )
+
         connector_configuration = self.api.connector.register(self.connector)
         logging.info("%s", f"Connector registered with ID: {self.connect_id}")
         self.connector_id = connector_configuration["id"]
         self.work_id = None
         self.applicant_id = connector_configuration["connector_user"]["id"]
         self.connector_state = connector_configuration["connector_state"]
-        self.config = connector_configuration["config"]
+        self.connector_config = connector_configuration["config"]
+
+        # Shutdown on SIGTERM
+        signal.signal(signal.SIGTERM, self._sigterm_handler)
 
         # Start ping thread
         if not self.connect_run_and_terminate:
@@ -582,14 +783,17 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             )
             self.ping.start()
 
-        # self.listen_stream = None
-        self.listen_queue = None
+        self.connector_loop: Optional[ConnectorLoop] = None
+        self.listen_queue: Optional[ListenQueue] = None
+        self.listen_stream: Optional[ListenStream] = None
 
     def stop(self) -> None:
+        if self.connector_loop:
+            self.connector_loop.stop()
         if self.listen_queue:
             self.listen_queue.stop()
-        # if self.listen_stream:
-        #     self.listen_stream.stop()
+        if self.listen_stream:
+            self.listen_stream.stop()
         self.ping.stop()
         self.api.connector.unregister(self.connector_id)
 
@@ -605,30 +809,31 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
     def get_validate_before_import(self) -> Optional[Union[bool, int, str]]:
         return self.connect_validate_before_import
 
-    def set_state(self, state) -> None:
-        """sets the connector state
-
-        :param state: state object
-        :type state: Dict
+    def set_state(self, state: Dict[str, Any]) -> None:
+        """Set the connector state
+        :param state: State object
+        :return: None
         """
-
         self.connector_state = json.dumps(state)
 
-    def get_state(self) -> Optional[Dict]:
-        """get the connector state
-
-        :return: returns the current state of the connector if there is any
-        :rtype:
+    def get_state(self) -> Optional[Dict[str, Any]]:
+        """Get the connector state
+        :return: The current state of the connector or None
         """
+        if not self.connector_state:
+            return None
 
         try:
-            if self.connector_state:
-                state = json.loads(self.connector_state)
-                if isinstance(state, Dict) and state:
-                    return state
-        except:  # pylint: disable=bare-except  # noqa: E722
-            pass
-        return None
+            state = json.loads(self.connector_state)
+        except (TypeError, ValueError):
+            log.exception("Invalid state: %s", self.connector_state)
+            return None
+
+        if state is None or isinstance(state, dict):
+            return state
+        else:
+            log.exception("Invalid state type: %s", self.connector_state)
+            return None
 
     def force_ping(self):
         try:
@@ -642,24 +847,34 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             )
             if initial_state != remote_state:
                 self.api.connector.ping(self.connector_id, initial_state)
-        except Exception:  # pylint: disable=broad-except
-            logging.error("Error pinging the API")
+        except Exception as ex:
+            log.exception("Error pinging the API: %s", ex)
 
-    def listen(self, message_callback: Callable[[Dict], str]) -> None:
-        """listen for messages and register callback function
-
-        :param message_callback: callback function to process messages
-        :type message_callback: Callable[[Dict], str]
+    def run_loop(
+        self,
+        callback: Callable[[str], None],
+    ) -> None:
+        """Run a loop, executing the callback after the interval has elapsed
+        :param callback: callback(work_id), executed after the interval has elapsed
         """
+        self.connector_loop = ConnectorLoop(self, callback)
+        self.connector_loop.start()
 
-        self.listen_queue = ListenQueue(self, self.config, message_callback)
+    def listen(
+        self,
+        message_callback: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        """listen for messages and register callback function
+        :param message_callback: Callback function to process messages
+        """
+        self.listen_queue = ListenQueue(self, self.connector_config, message_callback)
         self.listen_queue.start()
 
     def listen_stream(
         self,
-        message_callback,
-        url=None,
-        token=None,
+        message_callback: Callable[[Dict[str, Any]], None],
+        url: str = None,
+        token: str = None,
         verify_ssl=None,
         start_timestamp=None,
         live_stream_id=None,
@@ -672,7 +887,6 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
 
         :param message_callback: callback function to process messages
         """
-
         self.listen_stream = ListenStream(
             self,
             message_callback,
@@ -688,6 +902,15 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         )
         self.listen_stream.start()
         return self.listen_stream
+
+    def _sigterm_handler(self, _signum: int, _frame: Optional[FrameType]) -> None:
+        """SIGTERM handler for when listen() has been called.
+        :param _signum: Signal number
+        :param _frame: Stack frame
+        :return: None
+        """
+        log.info("Received SIGTERM, stopping threads")
+        self.stop()
 
     def get_opencti_url(self) -> Optional[Union[bool, int, str]]:
         return self.opencti_url
@@ -711,32 +934,25 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         logging.warning(msg)
 
     def date_now(self) -> str:
-        """get the current date (UTC)
-        :return: current datetime for utc
-        :rtype: str
+        """Get the current date (UTC)
+        :return: The current datetime for UTC
         """
-        return (
-            datetime.datetime.utcnow()
-            .replace(microsecond=0, tzinfo=datetime.timezone.utc)
-            .isoformat()
-        )
+        return datetime.utcnow().replace(microsecond=0, tzinfo=timezone.utc).isoformat()
 
     def date_now_z(self) -> str:
-        """get the current date (UTC)
-        :return: current datetime for utc
-        :rtype: str
+        """Get the current date (UTC) in "...+00:00Z" format
+        :return: The current datetime for UTC
         """
         return (
-            datetime.datetime.utcnow()
-            .replace(microsecond=0, tzinfo=datetime.timezone.utc)
+            datetime.utcnow()
+            .replace(microsecond=0, tzinfo=timezone.utc)
             .isoformat()
             .replace("+00:00", "Z")
         )
 
     # Push Stix2 helper
     def send_stix2_bundle(self, bundle, **kwargs) -> list:
-        """send a stix2 bundle to the API
-
+        """Send a stix2 bundle to the API
         :param work_id: a valid work id
         :param bundle: valid stix2 bundle
         :type bundle:
@@ -785,17 +1001,18 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
             self.api.work.add_expectations(work_id, len(bundles))
 
         pika_credentials = pika.PlainCredentials(
-            self.config["connection"]["user"], self.config["connection"]["pass"]
+            self.connector_config["connection"]["user"],
+            self.connector_config["connection"]["pass"],
         )
         pika_parameters = pika.ConnectionParameters(
-            host=self.config["connection"]["host"],
-            port=self.config["connection"]["port"],
-            virtual_host=self.config["connection"]["vhost"],
+            host=self.connector_config["connection"]["host"],
+            port=self.connector_config["connection"]["port"],
+            virtual_host=self.connector_config["connection"]["vhost"],
             credentials=pika_credentials,
             ssl_options=pika.SSLOptions(
-                create_ssl_context(), self.config["connection"]["host"]
+                create_ssl_context(), self.connector_config["connection"]["host"]
             )
-            if self.config["connection"]["use_ssl"]
+            if self.connector_config["connection"]["use_ssl"]
             else None,
         )
 
@@ -855,7 +1072,7 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         try:
             routing_key = "push_routing_" + self.connector_id
             channel.basic_publish(
-                exchange=self.config["push_exchange"],
+                exchange=self.connector_config["push_exchange"],
                 routing_key=routing_key,
                 body=json.dumps(message),
                 properties=pika.BasicProperties(
@@ -979,15 +1196,12 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         return final_items
 
     @staticmethod
-    def stix2_create_bundle(items) -> Optional[str]:
+    def stix2_create_bundle(items: List[Any]) -> str:
         """create a stix2 bundle with items
 
         :param items: valid stix2 items
-        :type items:
         :return: JSON of the stix2 bundle
-        :rtype:
         """
-
         bundle = {
             "type": "bundle",
             "id": f"bundle--{uuid.uuid4()}",
@@ -998,16 +1212,11 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
 
     @staticmethod
     def check_max_tlp(tlp: str, max_tlp: str) -> bool:
-        """check the allowed TLP levels for a TLP string
-
-        :param tlp: string for TLP level to check
-        :type tlp: str
-        :param max_tlp: the highest allowed TLP level
-        :type max_tlp: str
-        :return: TLP level in allowed TLPs
-        :rtype: bool
+        """Check the allowed TLP levels for a TLP string
+        :param tlp: TLP level to check
+        :param max_tlp: The highest allowed TLP level
+        :return: True if the TLP is in the allowed TLPs
         """
-
         allowed_tlps: Dict[str, List[str]] = {
             "TLP:RED": ["TLP:WHITE", "TLP:GREEN", "TLP:AMBER", "TLP:RED"],
             "TLP:AMBER": ["TLP:WHITE", "TLP:GREEN", "TLP:AMBER"],
@@ -1018,45 +1227,47 @@ class OpenCTIConnectorHelper:  # pylint: disable=too-many-public-methods
         return tlp in allowed_tlps[max_tlp]
 
     @staticmethod
-    def get_attribute_in_extension(key, object) -> any:
-        if (
-            "extensions" in object
-            and "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            ][key]
-        elif (
-            "extensions" in object
-            and "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            ][key]
+    def get_attribute_in_extension(
+        key,
+        obj: Mapping[str, Any],
+    ) -> Optional[Any]:
+        """
+        Try to get data from the EXT_OCTI or EXT_OCTI_SCO extensions.
+        :param key: Key within the extension.
+        :param obj: Data object.
+        :return: Extension key data, or None.
+        """
+        extensions = obj.get("extensions")
+        if extensions is None:
+            return None
+
+        value = extensions.get(STIX_EXT_OCTI, {}).get(key)
+        if value is not None:
+            return value
+
+        value = extensions.get(STIX_EXT_OCTI_SCO, {}).get(key)
+        if value is not None:
+            return value
+
         return None
 
     @staticmethod
-    def get_attribute_in_mitre_extension(key, object) -> any:
-        if (
-            "extensions" in object
-            and "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            ][key]
+    def get_attribute_in_mitre_extension(
+        key: str,
+        obj: Mapping[str, Any],
+    ) -> Optional[Any]:
+        """
+        Try to get data from the EXT_MITRE extension.
+        :param key: Key within the extension.
+        :param obj: Data object.
+        :return: Extension key data, or None.
+        """
+        extensions = obj.get("extensions")
+        if extensions is None:
+            return None
+
+        value = extensions.get(STIX_EXT_MITRE, {}).get(key)
+        if value is not None:
+            return value
+
         return None

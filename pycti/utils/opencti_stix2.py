@@ -964,7 +964,7 @@ class OpenCTIStix2:
             else:
                 self.opencti.log(
                     "error",
-                    "From ref of the sithing not found, doing nothing...",
+                    "From ref of the sighting not found, doing nothing...",
                 )
                 return None
 
@@ -982,7 +982,7 @@ class OpenCTIStix2:
                 else:
                     self.opencti.log(
                         "error",
-                        "To ref of the sithing not found, doing nothing...",
+                        "To ref of the sighting not found, doing nothing...",
                     )
                     return None
         date = datetime.datetime.today().strftime("%Y-%m-%dT%H:%M:%SZ")

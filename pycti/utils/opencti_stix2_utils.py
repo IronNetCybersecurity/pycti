@@ -1,3 +1,7 @@
+"""OpenCTI STIX2 Utilities"""
+
+from typing import Optional
+
 from stix2 import EqualityComparisonExpression, ObjectPath, ObservationExpression
 
 STIX_CYBER_OBSERVABLE_MAPPING = {
@@ -41,7 +45,7 @@ PATTERN_MAPPING = {
     "Process": ["pid"],
     "Software": ["name"],
     "Url": ["value"],
-    "User-Account": ["acount_login"],
+    "User-Account": ["account_login"],
     "Windows-Registry-Key": ["key"],
     "Windows-Registry-Value-Type": ["name"],
     "Hostname": ["value"],
@@ -55,37 +59,42 @@ OBSERVABLES_VALUE_INT = [
 
 
 class OpenCTIStix2Utils:
-    @staticmethod
-    def stix_observable_opencti_type(observable_type):
-        if observable_type in STIX_CYBER_OBSERVABLE_MAPPING:
-            return STIX_CYBER_OBSERVABLE_MAPPING[observable_type]
-        else:
-            return "Unknown"
+    """OpenCTI STIX2 Utilities"""
 
-    @staticmethod
-    def create_stix_pattern(observable_type, observable_value):
-        if observable_type in PATTERN_MAPPING:
-            lhs = ObjectPath(
-                observable_type.lower()
-                if "_" not in observable_type
-                else observable_type.split("_")[0].lower(),
-                PATTERN_MAPPING[observable_type],
-            )
-            ece = ObservationExpression(
-                EqualityComparisonExpression(lhs, observable_value)
-            )
-            return str(ece)
-        else:
+    @classmethod
+    def stix_observable_opencti_type(cls, observable_type: str) -> str:
+        """Get the OpenCTI observable type from a STIX2 type name.
+        :param observable_type: STIX2 object type
+        :return: The OpenCTI observable type, or "Unknown"
+        """
+        return STIX_CYBER_OBSERVABLE_MAPPING.get(observable_type, "Unknown")
+
+    @classmethod
+    def create_stix_pattern(
+        cls,
+        observable_type: str,
+        observable_value: str,
+    ) -> Optional[str]:
+        """Create a STIX2 compliant Indicator pattern
+        :param observable_type: Observable type name
+        :param observable_value: Observable value
+        :return: A STIX2 compliant Indicator pattern, None if the type is not recognized
+        """
+        if observable_type not in PATTERN_MAPPING:
             return None
 
-    """Generate random stix id (uuid v1)
-    This id will stored and resolved by openCTI
-    We will stored only 5 stix of this type to prevent database flooding
-    :param stix_type: the stix type
-    """
+        object_type = observable_type.split("_")[0].lower()
+        property_path = PATTERN_MAPPING[observable_type]
+        object_path = ObjectPath(object_type, property_path)
+
+        ece = EqualityComparisonExpression(object_path, observable_value)
+        oe = ObservationExpression(str(ece))
+        return str(oe)
 
     @staticmethod
-    def generate_random_stix_id(stix_type):
+    def generate_random_stix_id(stix_type: str) -> str:
+        """Obsolete"""
         raise ValueError(
-            "This function should not be used anymore, please use the generate_id function for SDO or proper SCO constructor"
+            "This function should not be used anymore, "
+            "please use the generate_id function for SDO or proper SCO constructor"
         )
