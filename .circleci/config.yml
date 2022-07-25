@@ -11,19 +11,16 @@ jobs:
       - checkout
       - run:
           name: install dependencies
-          command: pip3 install -r requirements.txt --user
-      - run:
-          name: install test-dependencies
-          command: pip3 install -r test-requirements.txt --user
+          command: poetry install
       - run:
           name: confirm black version
-          command: black --version
+          command: poetry run black --version
       - run:
           name: run isort check
-          command: isort --check-only .
+          command: poetry run isort --check-only .
       - run:
           name: run black check
-          command: black --check .
+          command: poetry run black --check .
       - slack/notify:
           branch_pattern: master
           event: fail
@@ -52,13 +49,10 @@ jobs:
       - checkout
       - run:
           name: install dependencies
-          command: pip3 install -r requirements.txt --user
-      - run:
-          name: install test-dependencies
-          command: pip3 install -r test-requirements.txt --user
+          command: poetry install
       - run:
           name: run pytest
-          command: python3 -m pytest --cov=pycti
+          command: poetry run pytest --cov=pycti
       - slack/notify:
           branch_pattern: master
           event: fail
@@ -71,21 +65,18 @@ jobs:
       - checkout
       - run:
           name: install dependencies
-          command: >
-            pip3 install --user -r requirements.txt -r test-requirements.txt
+          command: poetry install
       - run:
           name: check version
           command: |
-            package_version="$(
-                python3 -c 'import pycti; print(pycti.__version__)'
-            )"
+            package_version="$(poetry version --no-ansi)"
             [ "${CIRCLE_TAG}" = "${package_version}" ] \
               || printf "Version mismatch: %s is not equal to %s\n" \
                  "${CIRCLE_TAG}" "${package_version}"
       - run:
           name: build
           command: >
-            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" python3 -m build
+            SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" poetry build
       - slack/notify:
           branch_pattern: master
           event: fail
@@ -103,19 +94,11 @@ jobs:
       - attach_workspace:
           at: ~/opencti-client
       - run:
-          name: install dependencies
-          command: pip3 install -r requirements.txt --user
-      - run:
-          name: install twine
-          command: pip3 install twine
-      - run:
-          name: init .pypirc
-          command: >
-            printf "[pypi]\nusername = opencti\npassword = %s\n"
-            "${PYPI_PASSWORD}" >> ~/.pypirc
+          name: configure pypi credentials
+          command: poetry config http-basic.pypi opencti "${PYPI_PASSWORD}"
       - run:
           name: upload to pypi
-          command: twine upload dist/*
+          command: poetry publish
       - slack/notify:
           branch_pattern: master
           event: fail
