@@ -1,37 +1,35 @@
+"""OpenCTI connector spec"""
+
+from __future__ import annotations
+
 from enum import Enum
-
-# Scope definition
-# EXTERNAL_IMPORT = None
-# INTERNAL_IMPORT_FILE = Files mime types to support (application/json, ...)
-# INTERNAL_ENRICHMENT = Entity types to support (Report, Hash, ...)
-# INTERNAL_EXPORT_FILE = Files mime types to generate (application/pdf, ...)
+from typing import List, TypedDict
 
 
-class ConnectorType(Enum):
-    EXTERNAL_IMPORT = "EXTERNAL_IMPORT"  # From remote sources to OpenCTI stix2
-    INTERNAL_IMPORT_FILE = (
-        "INTERNAL_IMPORT_FILE"  # From OpenCTI file system to OpenCTI stix2
-    )
-    INTERNAL_ENRICHMENT = "INTERNAL_ENRICHMENT"  # From OpenCTI stix2 to OpenCTI stix2
-    INTERNAL_EXPORT_FILE = (
-        "INTERNAL_EXPORT_FILE"  # From OpenCTI stix2 to OpenCTI file system
-    )
-    STREAM = "STREAM"  # Read the stream and do something
+class ConnectorType(str, Enum):
+    """Connector types"""
+
+    # From remote sources to OpenCTI stix2
+    EXTERNAL_IMPORT = "EXTERNAL_IMPORT"
+
+    # From OpenCTI file system to OpenCTI stix2
+    # Scope: Files mime types to support (application/json, ...)
+    INTERNAL_IMPORT_FILE = "INTERNAL_IMPORT_FILE"
+
+    # From OpenCTI stix2 to OpenCTI stix2
+    # Scope: Entity types to support (Report, Hash, ...)
+    INTERNAL_ENRICHMENT = "INTERNAL_ENRICHMENT"
+
+    # From OpenCTI stix2 to OpenCTI file system
+    # Scope: Files mime types to generate (application/pdf, ...)
+    INTERNAL_EXPORT_FILE = "INTERNAL_EXPORT_FILE"
+
+    # Read the stream and do something
+    STREAM = "STREAM"
 
 
 class OpenCTIConnector:
-    """Main class for OpenCTI connector
-
-    :param connector_id: id for the connector (valid uuid4)
-    :type connector_id: str
-    :param connector_name: name for the connector
-    :type connector_name: str
-    :param connector_type: valid OpenCTI connector type (see `ConnectorType`)
-    :type connector_type: str
-    :param scope: connector scope
-    :type scope: str
-    :raises ValueError: if the connector type is not valid
-    """
+    """OpenCTI connector spec"""
 
     def __init__(
         self,
@@ -42,21 +40,33 @@ class OpenCTIConnector:
         auto: bool,
         only_contextual: bool,
     ):
+        """
+        Constructor
+        :param connector_id: A valid uuid4 as the connector ID
+        :param connector_name: The connector name
+        :param connector_type: A valid connector type (see `ConnectorType`)
+        :param scope: Connector scope
+        :param auto:
+        :param only_contextual:
+        :raises ValueError: If the connector type is not valid
+        """
         self.id = connector_id
         self.name = connector_name
         self.type = ConnectorType(connector_type)
         if self.type is None:
             raise ValueError("Invalid connector type: " + connector_type)
+
         if scope and len(scope) > 0:
             self.scope = scope.split(",")
         else:
             self.scope = []
+
         self.auto = auto
         self.only_contextual = only_contextual
 
-    def to_input(self) -> dict:
-        """connector input to use in API query
-
+    def to_input(self) -> ConnectorInput:
+        """
+        Connector input to use in an API query
         :return: dict with connector data
         :rtype: dict
         """
@@ -70,3 +80,20 @@ class OpenCTIConnector:
                 "only_contextual": self.only_contextual,
             }
         }
+
+
+class ConnectorInput(TypedDict):
+    """Connector input"""
+
+    input: ConnectorInputDetails
+
+
+class ConnectorInputDetails(TypedDict):
+    """Connector input details"""
+
+    id: str
+    name: str
+    type: str
+    scope: List[str]
+    auto: bool
+    only_contextual: bool

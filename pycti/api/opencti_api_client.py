@@ -1,140 +1,166 @@
-# coding: utf-8
+"""OpenCTI main API"""
+
+from __future__ import annotations
+
 import base64
-import datetime
 import io
 import json
 import logging
-from typing import Union
+import warnings
+from datetime import date, datetime
+from typing import (
+    Any,
+    BinaryIO,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import magic
 import requests
-import urllib3
+import urllib3.exceptions
 from pythonjsonlogger import jsonlogger
 
-from pycti.api.opencti_api_connector import OpenCTIApiConnector
-from pycti.api.opencti_api_work import OpenCTIApiWork
-from pycti.entities.opencti_attack_pattern import AttackPattern
-from pycti.entities.opencti_campaign import Campaign
-from pycti.entities.opencti_course_of_action import CourseOfAction
-from pycti.entities.opencti_external_reference import ExternalReference
-from pycti.entities.opencti_identity import Identity
-from pycti.entities.opencti_incident import Incident
-from pycti.entities.opencti_indicator import Indicator
-from pycti.entities.opencti_infrastructure import Infrastructure
-from pycti.entities.opencti_intrusion_set import IntrusionSet
-from pycti.entities.opencti_kill_chain_phase import KillChainPhase
-from pycti.entities.opencti_label import Label
-from pycti.entities.opencti_location import Location
-from pycti.entities.opencti_malware import Malware
-from pycti.entities.opencti_marking_definition import MarkingDefinition
-from pycti.entities.opencti_note import Note
-from pycti.entities.opencti_observed_data import ObservedData
-from pycti.entities.opencti_opinion import Opinion
-from pycti.entities.opencti_report import Report
-from pycti.entities.opencti_stix import Stix
-from pycti.entities.opencti_stix_core_object import StixCoreObject
-from pycti.entities.opencti_stix_core_relationship import StixCoreRelationship
-from pycti.entities.opencti_stix_cyber_observable import StixCyberObservable
-from pycti.entities.opencti_stix_cyber_observable_relationship import (
+from ..api.opencti_api_connector import OpenCTIApiConnector
+from ..api.opencti_api_work import OpenCTIApiWork
+from ..entities.opencti_attack_pattern import AttackPattern
+from ..entities.opencti_campaign import Campaign
+from ..entities.opencti_course_of_action import CourseOfAction
+from ..entities.opencti_external_reference import ExternalReference
+from ..entities.opencti_identity import Identity
+from ..entities.opencti_incident import Incident
+from ..entities.opencti_indicator import Indicator
+from ..entities.opencti_infrastructure import Infrastructure
+from ..entities.opencti_intrusion_set import IntrusionSet
+from ..entities.opencti_kill_chain_phase import KillChainPhase
+from ..entities.opencti_label import Label
+from ..entities.opencti_location import Location
+from ..entities.opencti_malware import Malware
+from ..entities.opencti_marking_definition import MarkingDefinition
+from ..entities.opencti_note import Note
+from ..entities.opencti_observed_data import ObservedData
+from ..entities.opencti_opinion import Opinion
+from ..entities.opencti_report import Report
+from ..entities.opencti_stix import Stix
+from ..entities.opencti_stix_core_object import StixCoreObject
+from ..entities.opencti_stix_core_relationship import StixCoreRelationship
+from ..entities.opencti_stix_cyber_observable import StixCyberObservable
+from ..entities.opencti_stix_cyber_observable_relationship import (
     StixCyberObservableRelationship,
 )
-from pycti.entities.opencti_stix_domain_object import StixDomainObject
-from pycti.entities.opencti_stix_object_or_stix_relationship import (
+from ..entities.opencti_stix_domain_object import StixDomainObject
+from ..entities.opencti_stix_object_or_stix_relationship import (
     StixObjectOrStixRelationship,
 )
-from pycti.entities.opencti_stix_sighting_relationship import StixSightingRelationship
-from pycti.entities.opencti_threat_actor import ThreatActor
-from pycti.entities.opencti_tool import Tool
-from pycti.entities.opencti_vulnerability import Vulnerability
-from pycti.utils.opencti_stix2 import OpenCTIStix2
+from ..entities.opencti_stix_sighting_relationship import StixSightingRelationship
+from ..entities.opencti_threat_actor import ThreatActor
+from ..entities.opencti_tool import Tool
+from ..entities.opencti_vulnerability import Vulnerability
+from ..utils.opencti_stix2 import OpenCTIStix2
 
+__all__ = [
+    "CustomJsonFormatter",
+    "OpenCTIApiClient",
+    "AnyDict",
+    "ProxyDict",
+    "ProcessedList",
+    "ProcessedDict",
+    "ProcessedResultsDict",
+    "EmptyDict",
+    "PageInfoDict",
+    "MultipartFileDataDict",
+    "LogsWorkerConfigDict",
+    "File",
+]
+
+log = logging.getLogger(__name__)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+AnyDict = Dict[str, Any]
+
+STIX_EXT_MITRE = "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
+STIX_EXT_OCTI = "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
+STIX_EXT_OCTI_SCO = "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
 
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
-    def add_fields(self, log_record, record, message_dict):
-        super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
+    """JSON logging formatter"""
+
+    def add_fields(
+        self,
+        log_record: AnyDict,
+        record: logging.LogRecord,
+        message_dict: AnyDict,
+    ) -> None:
+        """Add additional fields to a JSON log record"""
+        super().add_fields(log_record, record, message_dict)
+
         if not log_record.get("timestamp"):
             # This doesn't use record.created, so it is slightly off
-            now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             log_record["timestamp"] = now
+
         if log_record.get("level"):
             log_record["level"] = log_record["level"].upper()
         else:
             log_record["level"] = record.levelname
 
 
-class File:
-    def __init__(self, name, data, mime="text/plain"):
-        self.name = name
-        self.data = data
-        self.mime = mime
-
-
 class OpenCTIApiClient:
-    """Main API client for OpenCTI
-
-    :param url: OpenCTI API url
-    :type url: str
-    :param token: OpenCTI API token
-    :type token: str
-    :param log_level: log level for the client
-    :type log_level: str, optional
-    :param ssl_verify:
-    :type ssl_verify: bool, optional
-    :param proxies:
-    :type proxies: dict, optional, The proxy configuration, would have `http` and `https` attributes. Defaults to {}
-        ```
-        proxies: {
-            "http: "http://my_proxy:8080"
-            "https: "http://my_proxy:8080"
-        }
-        ```
-    :param json_logging: format the logs as json if set to True
-    :type json_logging: bool, optional
-    """
+    """OpenCTI main API client"""
 
     def __init__(
         self,
-        url,
-        token,
-        log_level="info",
-        ssl_verify=False,
-        proxies=None,
-        json_logging=False,
+        url: str,
+        token: str,
+        log_level: str = "info",
+        ssl_verify: Union[str, bool] = False,
+        proxies: ProxyDict = None,
+        json_logging: bool = False,
     ):
-        """Constructor method"""
-
+        """
+        Constructor
+        :param url: OpenCTI API url
+        :param token: OpenCTI API token
+        :param log_level: log level for the client
+        :param ssl_verify: Enable TLS certificate validation or the path to a CA bundle
+        :param proxies: Dictionary mapping protocol to the proxy URL
+        :param json_logging: Enable JSON log formatting
+        """
         # Check configuration
-        self.ssl_verify = ssl_verify
-        self.proxies = proxies
+        self._ssl_verify = ssl_verify
+        self._proxies = proxies
+
         if url is None or len(url) == 0:
             raise ValueError("An URL must be set")
+
         if token is None or len(token) == 0 or token == "ChangeMe":
             raise ValueError("A TOKEN must be set")
 
         # Configure logger
-        self.log_level = log_level
-        numeric_level = getattr(logging, self.log_level.upper(), None)
+        numeric_level = getattr(logging, log_level.upper(), None)
         if not isinstance(numeric_level, int):
-            raise ValueError("Invalid log level: " + self.log_level)
+            raise ValueError(f"Invalid log level: {log_level}")
 
         if json_logging:
             log_handler = logging.StreamHandler()
-            log_handler.setLevel(self.log_level.upper())
+            log_handler.setLevel(log_level.upper())
             formatter = CustomJsonFormatter(
                 "%(timestamp)s %(level)s %(name)s %(message)s"
             )
             log_handler.setFormatter(formatter)
-            logging.basicConfig(handlers=[log_handler], level=numeric_level, force=True)
+            logging.basicConfig(level=numeric_level, handlers=[log_handler], force=True)
         else:
             logging.basicConfig(level=numeric_level)
 
         # Define API
-        self.api_token = token
-        self.api_url = url + "/graphql"
-        self.request_headers = {"Authorization": "Bearer " + token}
-        self.session = requests.session()
+        self.base_url = url
+        self.api_url = f"{self.base_url}/graphql"
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._session = requests.session()
 
         # Define the dependencies
         self.work = OpenCTIApiWork(self)
@@ -177,209 +203,222 @@ class OpenCTIApiClient:
         # Check if openCTI is available
         if not self.health_check():
             raise ValueError(
-                "OpenCTI API is not reachable. Waiting for OpenCTI API to start or check your configuration..."
+                "OpenCTI API is not reachable. "
+                "Wait for the OpenCTI API to start or check your configuration"
             )
 
-    def set_applicant_id_header(self, applicant_id):
-        self.request_headers["opencti-applicant-id"] = applicant_id
-
-    def set_retry_number(self, retry_number):
-        self.request_headers["opencti-retry-number"] = (
-            "" if retry_number is None else str(retry_number)
-        )
-
-    def query(self, query, variables={}):
-        """submit a query to the OpenCTI GraphQL API
-
-        :param query: GraphQL query string
-        :type query: str
-        :param variables: GraphQL query variables, defaults to {}
-        :type variables: dict, optional
-        :return: returns the response json content
-        :rtype: Any
+    def set_applicant_id_header(self, applicant_id: str) -> None:
         """
+        Set the opencti-applicant-id header
+        :param applicant_id: Header value
+        :return: None
+        """
+        self._headers["opencti-applicant-id"] = applicant_id
+
+    def set_retry_number(self, retry_number: Optional[int]) -> None:
+        """
+        Set the opencti-retry-number header
+        :param retry_number: Retry count, or `None` to reset it
+        :return: `None`
+        """
+        if retry_number is None:
+            retry_number = ""
+
+        self._headers["opencti-retry-number"] = str(retry_number)
+
+    def query(self, query: str, variables: AnyDict = None) -> AnyDict:
+        """
+        Submit a query to the OpenCTI GraphQL API
+        :param query: GraphQL query string
+        :param variables: GraphQL query variables
+        :return: The response JSON content
+        """
+        if variables is None:
+            variables = {}
 
         query_var = {}
         files_vars = []
+
         # Implementation of spec https://github.com/jaydenseric/graphql-multipart-request-spec
         # Support for single or multiple upload
         # Batching or mixed upload or not supported
-        var_keys = variables.keys()
-        for key in var_keys:
-            val = variables[key]
-            is_file = type(val) is File
+        for key, val in variables.items():
+            is_file = isinstance(val, File)
             is_files = (
                 isinstance(val, list)
                 and len(val) > 0
-                and all(map(lambda x: isinstance(x, File), val))
+                and all(isinstance(x, File) for x in val)
             )
             if is_file or is_files:
-                files_vars.append({"key": key, "file": val, "multiple": is_files})
+                file_var = MultipartFileDataDict(key=key, file=val, multiple=is_files)
+                files_vars.append(file_var)
                 query_var[key] = None if is_file else [None] * len(val)
             else:
                 query_var[key] = val
 
         # If yes, transform variable (file to null) and create multipart query
         if len(files_vars) > 0:
-            multipart_data = {
-                "operations": json.dumps({"query": query, "variables": query_var})
-            }
             # Build the multipart map
             map_index = 0
             file_vars = {}
-            for file_var_item in files_vars:
-                is_multiple_files = file_var_item["multiple"]
-                var_name = "variables." + file_var_item["key"]
+            for file_var in files_vars:
+                var_key = file_var["key"]
+                var_name = f"variables.{var_key}"
+                is_multiple_files = file_var["multiple"]
                 if is_multiple_files:
                     # [(var_name + "." + i)] if is_multiple_files else
-                    for _ in file_var_item["file"]:
-                        file_vars[str(map_index)] = [(var_name + "." + str(map_index))]
+                    for _ in file_var["file"]:
+                        file_vars[str(map_index)] = [f"{var_name}.{map_index}"]
                         map_index += 1
                 else:
                     file_vars[str(map_index)] = [var_name]
                     map_index += 1
-            multipart_data["map"] = json.dumps(file_vars)
+
+            multipart_data = {
+                "operations": json.dumps({"query": query, "variables": query_var}),
+                "map": json.dumps(file_vars),
+            }
+
             # Add the files
             file_index = 0
-            multipart_files = []
-            for file_var_item in files_vars:
-                files = file_var_item["file"]
-                is_multiple_files = file_var_item["multiple"]
-                if is_multiple_files:
-                    for file in files:
-                        if isinstance(file.data, str):
-                            file_multi = (
-                                str(file_index),
-                                (
-                                    file.name,
-                                    io.BytesIO(file.data.encode()),
-                                    file.mime,
-                                ),
-                            )
-                        else:
-                            file_multi = (
-                                str(file_index),
-                                (file.name, file.data, file.mime),
-                            )
-                        multipart_files.append(file_multi)
-                        file_index += 1
-                else:
-                    if isinstance(files.data, str):
-                        file_multi = (
-                            str(file_index),
-                            (files.name, io.BytesIO(files.data.encode()), files.mime),
-                        )
-                    else:
-                        file_multi = (
-                            str(file_index),
-                            (files.name, files.data, files.mime),
-                        )
+            multipart_files: List[Tuple[str, Tuple[str, BinaryIO, str]]] = []
+
+            for file_var in files_vars:
+                files = file_var["file"]
+                is_multiple_files = file_var["multiple"]
+
+                if not is_multiple_files:
+                    files = [files]
+
+                for file in files:  # type: File
+                    if isinstance(file.data, str):
+                        file.data = file.data.encode()
+
+                    file_stream = io.BytesIO(file.data)
+                    file_data = (file.name, file_stream, file.mime)
+                    file_multi = (str(file_index), file_data)
+
                     multipart_files.append(file_multi)
                     file_index += 1
+
             # Send the multipart request
-            r = self.session.post(
+            resp = self._session.post(
                 self.api_url,
                 data=multipart_data,
                 files=multipart_files,
-                headers=self.request_headers,
-                verify=self.ssl_verify,
-                proxies=self.proxies,
+                headers=self._headers,
+                verify=self._ssl_verify,
+                proxies=self._proxies,
             )
+
         # If no
         else:
-            r = self.session.post(
+            resp = self._session.post(
                 self.api_url,
                 json={"query": query, "variables": variables},
-                headers=self.request_headers,
-                verify=self.ssl_verify,
-                proxies=self.proxies,
+                headers=self._headers,
+                verify=self._ssl_verify,
+                proxies=self._proxies,
             )
-        # Build response
-        if r.status_code == 200:
-            result = r.json()
-            if "errors" in result:
-                main_error = result["errors"][0]
-                error_name = (
-                    main_error["name"]
-                    if "name" in main_error
-                    else main_error["message"]
-                )
-                if "data" in main_error and "reason" in main_error["data"]:
-                    logging.error(main_error["data"]["reason"])
-                    raise ValueError(
-                        {"name": error_name, "message": main_error["data"]["reason"]}
-                    )
-                else:
-                    logging.error(main_error["message"])
-                    raise ValueError(
-                        {"name": error_name, "message": main_error["message"]}
-                    )
-            else:
-                return result
-        else:
-            logging.info(r.text)
-            raise ValueError(r.text)
 
-    def fetch_opencti_file(self, fetch_uri, binary=False, serialize=False):
-        """get file from the OpenCTI API
+        # Check for HTTP failures
+        if resp.status_code != 200:
+            log.error("GraphQL returned HTTP %d: %s", resp.status_code, resp.text)
+            raise ValueError(
+                {
+                    "name": f"GraphQL HTTP {resp.status_code}",
+                    "message": resp.text,
+                }
+            )
 
-        :param fetch_uri: download URI to use
-        :type fetch_uri: str
-        :param binary: [description], defaults to False
-        :type binary: bool, optional
-        :return: returns either the file content as text or bytes based on `binary`
-        :rtype: str or bytes
+        result = resp.json()
+
+        # Check for errors
+        if "errors" in result:
+            main_error = result["errors"][0]
+            error_message = main_error["message"]
+
+            # Use the message if the name is missing
+            error_name = main_error.get("name", error_message)
+
+            # Use the message if the reason is missing
+            error_reason = main_error.get("data", {}).get("reason", error_message)
+
+            log.error(error_reason)
+            raise ValueError(
+                {
+                    "name": error_name,
+                    "message": error_reason,
+                }
+            )
+
+        return result
+
+    def fetch_opencti_file(
+        self,
+        fetch_uri: str,
+        binary: bool = False,
+        serialize: bool = False,
+    ) -> Union[str, bytes]:
         """
-
-        r = self.session.get(fetch_uri, headers=self.request_headers)
+        Get a file from the OpenCTI API
+        :param fetch_uri: The download URI to use
+        :param binary: Fetch the contents as bytes
+        :param serialize: Fetch the contents as UTF-8 encoded Base64
+        :return: Either the file content as text or bytes based on `binary`
+        """
+        resp = self._session.get(fetch_uri, headers=self._headers)
         if binary:
             if serialize:
-                return base64.b64encode(r.content).decode("utf-8")
-            return r.content
-        if serialize:
-            return base64.b64encode(r.text).decode("utf-8")
-        return r.text
+                return base64.b64encode(resp.content).decode("utf-8")
+            else:
+                return resp.content
 
-    def log(self, level, message):
-        """log a message with defined log level
+        else:
+            if serialize:
+                text = resp.text.encode("utf-8")
+                return base64.b64encode(text).decode("utf-8")
+            else:
+                return resp.text
 
-        :param level: must be a valid logging log level (debug, info, warning, error)
-        :type level: str
-        :param message: the message to log
-        :type message: str
+    def log(self, level: str, message: str) -> None:
         """
+        Log a message with defined log level
+        :param level: A valid logging log level (debug, info, warning, error)
+        :param message: The message to log
+        :return: None
+        """
+        warnings.warn("Use logging.getLogger(__name__).<level>")
 
         if level == "debug":
-            logging.debug(message)
+            log.debug(message)
         elif level == "info":
-            logging.info(message)
+            log.info(message)
         elif level == "warning":
-            logging.warn(message)
+            log.warning(message)
         elif level == "error":
-            logging.error(message)
+            log.error(message)
+        else:
+            log.warning("Unknown log level: %s", level)
 
-    def health_check(self):
-        """submit an example request to the OpenCTI API.
-
-        :return: returns `True` if the health check has been successful
-        :rtype: bool
+    def health_check(self) -> bool:
+        """
+        Submit an example request to the OpenCTI API.
+        :return: `True` if the health check has been successful
         """
         try:
             test = self.threat_actor.list(first=1)
-            if test is not None:
-                return True
-        except:
+            return test is not None
+        except Exception as ex:
+            log.error("Health check failed", exc_info=ex)
             return False
-        return False
 
-    def get_logs_worker_config(self):
-        """get the logsWorkerConfig
-
-        return: the logsWorkerConfig
-        rtype: dict
+    def get_logs_worker_config(self) -> LogsWorkerConfigDict:
         """
-
-        logging.info("Getting logs worker config...")
+        Get the logsWorkerConfig
+        return: The logsWorkerConfig
+        """
+        log.info("Getting logs worker config")
         query = """
             query LogsWorkerConfig {
                 logsWorkerConfig {
@@ -396,296 +435,360 @@ class OpenCTIApiClient:
         result = self.query(query)
         return result["data"]["logsWorkerConfig"]
 
-    def not_empty(self, value):
-        """check if a value is empty for str, list and int
-
-        :param value: value to check
-        :type value: str or list or int or float or bool or datetime.date
-        :return: returns `True` if the value is one of the supported types and not empty
-        :rtype: bool
+    def not_empty(
+        self, value: Union[str, int, date, datetime, list, dict, None]
+    ) -> bool:
         """
-
-        if value is not None:
-            if isinstance(value, bool):
-                return True
-            if isinstance(value, datetime.date):
-                return True
-            if isinstance(value, str):
-                if len(value) > 0:
-                    return True
-                else:
-                    return False
-            if isinstance(value, dict):
-                return bool(value)
-            if isinstance(value, list):
-                is_not_empty = False
-                for v in value:
-                    if len(v) > 0:
-                        is_not_empty = True
-                return is_not_empty
-            if isinstance(value, float):
-                return True
-            if isinstance(value, int):
-                return True
-            else:
-                return False
-        else:
+        Check if a value is empty for various types
+        :param value: The value to check
+        :return: `True` if the value is one of the supported types and not empty
+        """
+        if value is None:
             return False
 
-    def process_multiple(self, data: dict, with_pagination=False) -> Union[dict, list]:
-        """processes data returned by the OpenCTI API with multiple entities
+        if isinstance(value, (bool, float, int, date, datetime)):
+            return True
 
-        :param data: data to process
-        :param with_pagination: whether to use pagination with the API
-        :returns: returns either a dict or list with the processes entities
+        if isinstance(value, (str, dict)):
+            return bool(value)
+
+        if isinstance(value, list):
+            try:
+                return any(map(self.not_empty, value))
+            except RecursionError:
+                log.warning("Recursion error checking not_empty")
+                return True
+
+        log.warning("Unsupported type for 'not_empty': %s", type(value).__name__)
+        return False
+
+    def process_multiple(
+        self,
+        data: AnyDict,
+        with_pagination: bool = False,
+    ) -> ProcessedResultsDict:
         """
-
+        Processes data returned by the OpenCTI API with multiple entities
+        :param data: Data to process
+        :param with_pagination: Use pagination with the API
+        :return: A dict if paginated otherwise a list with the processed entities
+        """
         if with_pagination:
-            result = {"entities": [], "pagination": {}}
+            return self.process_multiple_paginated(data)
         else:
-            result = []
-        if data is None:
-            return result
-        for edge in (
-            data["edges"] if "edges" in data and data["edges"] is not None else []
-        ):
-            row = edge["node"]
-            if with_pagination:
-                result["entities"].append(self.process_multiple_fields(row))
-            else:
-                result.append(self.process_multiple_fields(row))
-        if with_pagination and "pageInfo" in data:
-            result["pagination"] = data["pageInfo"]
-        return result
+            return self.process_multiple_flat(data)
 
-    def process_multiple_ids(self, data) -> list:
-        """processes data returned by the OpenCTI API with multiple ids
-
-        :param data: data to process
-        :return: returns a list of ids
+    def process_multiple_flat(self, data: AnyDict) -> ProcessedList:
         """
-
+        Processes data returned by the OpenCTI API with multiple entities
+        :param data: Data to process
+        :return: A list with the processed entities
+        """
         result = []
+
         if data is None:
             return result
-        if isinstance(data, list):
-            for d in data:
-                if isinstance(d, dict) and "id" in d:
-                    result.append(d["id"])
+
+        for edge in data.get("edges", []):
+            node = edge["node"]
+            result.append(self.process_multiple_fields(node))
+
         return result
 
-    def process_multiple_fields(self, data):
-        """processes data returned by the OpenCTI API with multiple fields
-
-        :param data: data to process
-        :type data: dict
-        :return: returns the data dict with all fields processed
-        :rtype: dict
+    def process_multiple_paginated(self, data: AnyDict) -> ProcessedDict:
         """
+        Processes data returned by the OpenCTI API with multiple entities
+        :param data: Data to process
+        :return: A dict with the processed entities and pagination details
+        """
+        result = ProcessedDict(
+            entities=[],
+            pagination=EmptyDict(),
+        )
 
         if data is None:
-            return data
-        if "createdBy" in data and data["createdBy"] is not None:
-            data["createdById"] = data["createdBy"]["id"]
-            if "objectMarking" in data["createdBy"]:
-                data["createdBy"]["objectMarking"] = self.process_multiple(
-                    data["createdBy"]["objectMarking"]
+            return result
+
+        for edge in data.get("edges", []):
+            node = edge["node"]
+            result["entities"].append(self.process_multiple_fields(node))
+
+        if "pageInfo" in data:
+            result["pagination"] = data["pageInfo"]
+
+        return result
+
+    def process_multiple_ids(self, data: Optional[List[AnyDict]]) -> List[str]:
+        """
+        Process data returned by the OpenCTI API with multiple IDs
+        :param data: The data to process
+        :return: A list of IDs
+        """
+        result = []
+
+        if data is None:
+            return result
+
+        for entry in data:
+            obj_id = entry.get("id")
+            if obj_id is not None:
+                result.append(obj_id)
+
+        return result
+
+    def process_multiple_fields(self, data: Optional[AnyDict]) -> Optional[AnyDict]:
+        """
+        Process data returned by the OpenCTI API with multiple fields
+        :param data: data to process
+        :return: The data dict with all fields processed
+        """
+        if data is None:
+            return None
+
+        created_by = data.get("createdBy")
+        if created_by is not None:
+            data["createdById"] = created_by["id"]
+
+            object_marking = data.get("objectMarking")
+            if object_marking is not None:
+                created_by["objectMarking"] = self.process_multiple(object_marking)
+                created_by["objectMarkingIds"] = self.process_multiple_ids(
+                    object_marking
                 )
-                data["createdBy"]["objectMarkingIds"] = self.process_multiple_ids(
-                    data["createdBy"]["objectMarking"]
-                )
-            if "objectLabel" in data["createdBy"]:
-                data["createdBy"]["objectLabel"] = self.process_multiple(
-                    data["createdBy"]["objectLabel"]
-                )
-                data["createdBy"]["objectLabelIds"] = self.process_multiple_ids(
-                    data["createdBy"]["objectLabel"]
-                )
+
+            object_label = created_by.get("objectLabel")
+            if object_label is not None:
+                created_by["objectLabel"] = self.process_multiple(object_label)
+                created_by["objectLabelIds"] = self.process_multiple_ids(object_label)
+
         else:
             data["createdById"] = None
-        if "objectMarking" in data:
-            data["objectMarking"] = self.process_multiple(data["objectMarking"])
-            data["objectMarkingIds"] = self.process_multiple_ids(data["objectMarking"])
-        if "objectLabel" in data:
-            data["objectLabel"] = self.process_multiple(data["objectLabel"])
-            data["objectLabelIds"] = self.process_multiple_ids(data["objectLabel"])
-        if "reports" in data:
-            data["reports"] = self.process_multiple(data["reports"])
-            data["reportsIds"] = self.process_multiple_ids(data["reports"])
-        if "notes" in data:
-            data["notes"] = self.process_multiple(data["notes"])
-            data["notesIds"] = self.process_multiple_ids(data["notes"])
-        if "opinions" in data:
-            data["opinions"] = self.process_multiple(data["opinions"])
-            data["opinionsIds"] = self.process_multiple_ids(data["opinions"])
-        if "observedData" in data:
-            data["observedData"] = self.process_multiple(data["observedData"])
-            data["observedDataIds"] = self.process_multiple_ids(data["observedData"])
-        if "killChainPhases" in data:
-            data["killChainPhases"] = self.process_multiple(data["killChainPhases"])
-            data["killChainPhasesIds"] = self.process_multiple_ids(
-                data["killChainPhases"]
-            )
-        if "externalReferences" in data:
-            data["externalReferences"] = self.process_multiple(
-                data["externalReferences"]
-            )
-            data["externalReferencesIds"] = self.process_multiple_ids(
-                data["externalReferences"]
-            )
-        if "objects" in data:
-            data["objects"] = self.process_multiple(data["objects"])
-            data["objectsIds"] = self.process_multiple_ids(data["objects"])
-        if "observables" in data:
-            data["observables"] = self.process_multiple(data["observables"])
-            data["observablesIds"] = self.process_multiple_ids(data["observables"])
-        if "stixCoreRelationships" in data:
-            data["stixCoreRelationships"] = self.process_multiple(
-                data["stixCoreRelationships"]
-            )
-            data["stixCoreRelationshipsIds"] = self.process_multiple_ids(
-                data["stixCoreRelationships"]
-            )
-        if "indicators" in data:
-            data["indicators"] = self.process_multiple(data["indicators"])
-            data["indicatorsIds"] = self.process_multiple_ids(data["indicators"])
-        if "importFiles" in data:
-            data["importFiles"] = self.process_multiple(data["importFiles"])
-            data["importFilesIds"] = self.process_multiple_ids(data["importFiles"])
+
+        data_keys = [
+            "objectMarking"
+            "objectLabel"
+            "reports"
+            "notes"
+            "opinions"
+            "observedData"
+            "killChainPhases"
+            "externalReferences"
+            "objects"
+            "observables"
+            "stixCoreRelationships"
+            "indicators"
+            "importFiles"
+        ]
+
+        for key in data_keys:
+            value = data.get(key)
+            if value is not None:
+                data[key] = self.process_multiple(value)
+                data[f"{key}Ids"] = self.process_multiple_ids(value)
+
         return data
 
-    def upload_file(self, **kwargs):
-        """upload a file to OpenCTI API
-
-        :param `**kwargs`: arguments for file upload (required: `file_name` and `data`)
-        :return: returns the query respons for the file upload
-        :rtype: dict
+    def upload_file(
+        self,
+        *,
+        file_name: str,
+        data: bytes = None,
+        mime_type: str = "text/plain",
+    ) -> AnyDict:
         """
+        Upload a file to the OpenCTI API
+        :param file_name: File name
+        :param data: File data
+        :param mime_type: File mime type
+        :return: The query response for the file upload
+        """
+        log.info("Uploading a file")
 
-        file_name = kwargs.get("file_name", None)
-        data = kwargs.get("data", None)
-        mime_type = kwargs.get("mime_type", "text/plain")
-        if file_name is not None:
-            self.log("info", "Uploading a file.")
-            query = """
-                mutation UploadImport($file: Upload!) {
-                    uploadImport(file: $file) {
-                        id
-                        name
-                    }
+        if data is None:
+            data = open(file_name, "rb")
+            if file_name.endswith(".json"):
+                mime_type = "application/json"
+            else:
+                mime_type = magic.from_file(file_name, mime=True)
+
+        query = """
+            mutation UploadImport($file: Upload!) {
+                uploadImport(file: $file) {
+                    id
+                    name
                 }
-             """
-            if data is None:
-                data = open(file_name, "rb")
-                if file_name.endswith(".json"):
-                    mime_type = "application/json"
-                else:
-                    mime_type = magic.from_file(file_name, mime=True)
+            }
+         """
+        variables = {"file": File(file_name, data, mime_type)}
+        result = self.query(query, variables)
+        return result["data"]["uploadImport"]
 
-            return self.query(query, {"file": (File(file_name, data, mime_type))})
-        else:
-            self.log(
-                "error",
-                "[upload] Missing parameters: file_name or data",
-            )
-            return None
-
-    def upload_pending_file(self, **kwargs):
-        """upload a file to OpenCTI API
-
-        :param `**kwargs`: arguments for file upload (required: `file_name` and `data`)
-        :return: returns the query respons for the file upload
-        :rtype: dict
+    def upload_pending_file(
+        self,
+        *,
+        file_name: str,
+        data: bytes = None,
+        mime_type: str = "text/plain",
+        entity_id: str = None,
+    ) -> UploadFileDataDict:
+        """Upload a pending file to the OpenCTI API
+        :param file_name: File name
+        :param data: File data
+        :param mime_type: File mime type
+        :param entity_id: Pending entity ID
+        :return: The query response for the file upload
         """
+        log.info("Uploading a file.")
 
-        file_name = kwargs.get("file_name", None)
-        data = kwargs.get("data", None)
-        mime_type = kwargs.get("mime_type", "text/plain")
-        entity_id = kwargs.get("entity_id", None)
+        if data is None:
+            data = open(file_name, "rb")
+            if file_name.endswith(".json"):
+                mime_type = "application/json"
+            else:
+                mime_type = magic.from_file(file_name, mime=True)
 
-        if file_name is not None:
-            self.log("info", "Uploading a file.")
-            query = """
-                    mutation UploadPending($file: Upload!, $entityId: String) {
-                        uploadPending(file: $file, entityId: $entityId) {
-                            id
-                            name
-                        }
-                    }
-                 """
-            if data is None:
-                data = open(file_name, "rb")
-                if file_name.endswith(".json"):
-                    mime_type = "application/json"
-                else:
-                    mime_type = magic.from_file(file_name, mime=True)
-            return self.query(
-                query,
-                {"file": (File(file_name, data, mime_type)), "entityId": entity_id},
-            )
-        else:
-            self.log(
-                "error",
-                "[upload] Missing parameters: file_name or data",
-            )
-            return None
+        query = """
+            mutation UploadPending($file: Upload!, $entityId: String) {
+                uploadPending(file: $file, entityId: $entityId) {
+                    id
+                    name
+                }
+            }
+         """
+        variables = {
+            "file": File(file_name, data, mime_type),
+            "entityId": entity_id,
+        }
+        result = self.query(query, variables)
+        return result["data"]["uploadPending"]
 
-    def get_stix_content(self, id):
-        """get the STIX content of any entity
-
-        return: the STIX content in JSON
-        rtype: dict
+    def get_stix_content(self, stix_id: str) -> AnyDict:
         """
-
-        logging.info("Entity in JSON " + id)
+        Get the embedded STIX content of any entity
+        :return: The STIX content in JSON
+        """
+        log.info("Entity in JSON %s", stix_id)
         query = """
             query StixQuery($id: String!) {
                 stix(id: $id)
             }
         """
-        result = self.query(query, {"id": id})
-        return json.loads(result["data"]["stix"])
+        variables = {"id": stix_id}
+        result = self.query(query, variables)
+        result = result["data"]["stix"]
+        return json.loads(result)
 
     @staticmethod
-    def get_attribute_in_extension(key, object) -> any:
-        if (
-            "extensions" in object
-            and "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--ea279b3e-5c71-4632-ac08-831c66a786ba"
-            ][key]
-        elif (
-            "extensions" in object
-            and "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--f93e2c80-4231-4f9a-af8b-95c9bd566a82"
-            ][key]
+    def get_attribute_in_extension(
+        key: str,
+        obj: AnyDict,
+    ) -> Optional[Any]:
+        """
+        Try to get data from the EXT_OCTI or EXT_OCTI_SCO extensions
+        :param key: Key within the extension
+        :param obj: Data object
+        :return: Extension key data, or the default value
+        """
+        extensions = obj.get("extensions")
+        if extensions is None:
+            return None
+
+        octi = extensions.get(STIX_EXT_OCTI, {}).get(key)
+        if octi is not None:
+            return octi
+
+        octi_sci = extensions.get(STIX_EXT_OCTI_SCO, {}).get(key)
+        if octi_sci is not None:
+            return octi
+
         return None
 
     @staticmethod
-    def get_attribute_in_mitre_extension(key, object) -> any:
-        if (
-            "extensions" in object
-            and "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            in object["extensions"]
-            and key
-            in object["extensions"][
-                "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            ]
-        ):
-            return object["extensions"][
-                "extension-definition--322b8f77-262a-4cb8-a915-1e441e00329b"
-            ][key]
+    def get_attribute_in_mitre_extension(
+        key: str,
+        obj: AnyDict,
+    ) -> Optional[Any]:
+        """
+        Try to get data from the EXT_MITRE extension
+        :param key: Key within the extension
+        :param obj: Data object
+        :return: Extension key data, or None
+        """
+        extensions = obj.get("extensions")
+        if extensions is None:
+            return None
+
+        mitre = extensions.get(STIX_EXT_MITRE, {}).get(key)
+        if mitre is not None:
+            return mitre
+
         return None
+
+
+class ProxyDict(TypedDict):
+    """A requests compatible proxy definition"""
+
+    http: Optional[str]
+    https: Optional[str]
+
+
+ProcessedList = List[AnyDict]
+
+
+class ProcessedDict(TypedDict):
+    """Result from `OpenCTIApiClient.process_multiple_paginated`"""
+
+    entities: List[AnyDict]
+    pagination: Union[EmptyDict, PageInfoDict]
+
+
+ProcessedResultsDict = Union[ProcessedList, ProcessedDict]
+
+
+class EmptyDict(TypedDict):
+    """An empty dict"""
+
+
+class PageInfoDict(TypedDict):
+    """Pagination info"""
+
+    startCursor: str
+    endCursor: str
+    hasNextPage: bool
+    hasPreviousPage: bool
+    globalCount: int
+
+
+class MultipartFileDataDict(TypedDict):
+    """Multi-part file upload data"""
+
+    key: str
+    file: Union[File, List[File]]
+    multiple: bool
+
+
+class UploadFileDataDict(TypedDict):
+    """Spec for an uploaded file"""
+
+    id: str
+    name: str
+
+
+class LogsWorkerConfigDict(TypedDict):
+    """Query: logsWorkerConfig"""
+
+    elasticsearch_url: List[str]
+    elasticsearch_proxy: Optional[str]
+    elasticsearch_index: str
+    elasticsearch_username: Optional[str]
+    elasticsearch_password: Optional[str]
+    elasticsearch_api_key: Optional[str]
+    elasticsearch_ssl_reject_unauthorized: Optional[bool]
+
+
+class File(NamedTuple):
+    """Spec for uploading a file"""
+
+    name: str
+    data: Union[str, bytes]
+    mime: str = "text/plain"
